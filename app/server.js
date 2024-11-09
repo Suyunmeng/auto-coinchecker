@@ -150,7 +150,7 @@ app.use(
 );
 
 //启动核心脚本运行web,哪吒和argo
-exec("pm2 start /home/choreouser/run.sh --log /tmp/1.log", function (err, stdout, stderr) {
+exec("pm2 list", function (err, stdout, stderr) {
   if (err) {
     console.error(err);
     return;

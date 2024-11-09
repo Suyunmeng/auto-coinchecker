@@ -24,6 +24,6 @@ RUN pip3 install websocket-client requests &&\
      usermod -aG sudo choreouser
 
 
-ENTRYPOINT [ "node", "/home/choreouser/server.js" ]
+ENTRYPOINT [ "bash", "/home/choreouser/run.sh" ]
 
 USER 10001
