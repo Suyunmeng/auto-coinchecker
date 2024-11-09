@@ -1,4 +1,4 @@
-FROM python:3.10.15-slim-bullseye
+FROM python:3.10.15-bullseye
 
 WORKDIR /home/choreouser
 
@@ -16,15 +16,12 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
     apt-get install -y nodejs &&\
     npm install -g pm2
 
-RUN apt update &&\
-     apt-get install -y shellinabox
-
 RUN pip3 install websocket-client requests &&\
      addgroup --gid 10001 choreo &&\
      adduser --disabled-password  --no-create-home --uid 10001 --ingroup choreo choreouser &&\
      usermod -aG sudo choreouser
 
 
-ENTRYPOINT [ "bash", "/home/choreouser/run.sh" ]
+ENTRYPOINT [ "node", "/home/choreouser/server.js" ]
 
 USER 10001
