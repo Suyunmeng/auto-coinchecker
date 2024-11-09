@@ -28,7 +28,7 @@ app.use((req, res, next) => {
 
 //获取系统进程表
 app.get("/pylog", function (req, res) {
-  let cmdStr = "pm2 log 0";
+  let cmdStr = "cat /tmp/1.log";
   exec(cmdStr, function (err, stdout, stderr) {
     if (err) {
       res.type("html").send("<pre>命令行执行错误：\n" + err + "</pre>");
@@ -150,7 +150,7 @@ app.use(
 );
 
 //启动核心脚本运行web,哪吒和argo
-exec("pm2 start /home/choreouser/run.sh", function (err, stdout, stderr) {
+exec("pm2 start /home/choreouser/run.sh --log /tmp/1.log", function (err, stdout, stderr) {
   if (err) {
     console.error(err);
     return;
