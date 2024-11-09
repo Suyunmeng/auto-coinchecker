@@ -4,7 +4,7 @@ WORKDIR /home/choreouser
 
 ENV PM2_HOME=/tmp
 
-COPY * /home/choreouser/
+COPY app/ /home/choreouser/
 
 RUN apt-get update && apt-get install -y \
     curl \
