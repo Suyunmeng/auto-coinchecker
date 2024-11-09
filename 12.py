@@ -177,6 +177,8 @@ class BinanceMonitor:
             print(f"[DEBUG] Checking 1-Minute Fluctuation for {symbol}")
             print(f"  Base Price: {base_price}, Current Price: {current_price}")
             print(f"  Price Change: {price_change * 100:.2f}%, Dominant Volume: {dominant_volume} USDT")
+            print(f"  Buyer (raw): {self.volume_data[symbol]['buy']} USDT, Seller (raw): {self.volume_data[symbol]['sell']} USDT")
+            print(f"  Buyer: {buy_volume} USDT, Seller: {sell_volume} USDT, Dominant Volume: {dominant_volume} USDT")
 
             if abs(price_change) >= FLUCTUATION_THRESHOLD_1M and dominant_volume > VOLUME_THRESHOLD:
                 print(f"[DEBUG] 1-Minute Trigger Conditions Met for {symbol}")
@@ -232,6 +234,16 @@ class BinanceMonitor:
                 f"{minutes_since_baseline} min",
                 "1h"
             )
+    def format_volume(self, volume):
+        """格式化成交量为带单位的字符串（K, M, B等）"""
+        if volume >= 1_000_000_000:
+            return f"{volume / 1_000_000_000:.2f}B"
+        elif volume >= 1_000_000:
+            return f"{volume / 1_000_000:.2f}M"
+        elif volume >= 1_000:
+            return f"{volume / 1_000:.2f}K"
+        else:
+            return f"{volume:.2f}"
 
     def send_telegram_alert(self, symbol, price, price_change, volume, time, interval_type, dominant_flow, flow_dir, buy_volume, sell_volume):
         # 判断涨跌方向
