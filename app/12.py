@@ -27,20 +27,23 @@ class BinanceMonitor:
         self.alert_triggered_1h = set()
         self.alert_count_1h = defaultdict(int)
         self.last_prices = {}
-        self.current_minute = datetime.utcnow().minute
-        self.volume_data = defaultdict(lambda: {"buy": 0, "sell": 0})
+        self.basic_prices_1h = {}
+        self.basic_prices_1m = {}
+        now = datetime.utcnow()
+        self.current_minute = now.minute
+        self.current_hour = now.hour
+        self.volume_data_1m = defaultdict(lambda: {"buy": 0, "sell": 0})
+        self.volume_data_1h = defaultdict(lambda: {"buy": 0, "sell": 0})
         self.triggered_time_1m = {}  # Tracks last triggered time for 1-minute alerts
         self.triggered_price_1m = {}  # Tracks last triggered price for 1-minute alerts
-        self.vol_24h = defaultdict(float)
         self.ws = None
         self.ws_connections = {}
-        self.request_id = 1
         self.stop_event = threading.Event()
 
     def fetch_usdt_pairs(self):
         response = requests.get(BINANCE_CONTRACT_API)
         data = response.json()
-        return [s["symbol"] for s in data["symbols"] if s["quoteAsset"] == "USDT"]
+        return [s["symbol"] for s in data["symbols"] if s["quoteAsset"] == "USDT" and s["symbol"].endswith("USDT")]
 
     def update_symbol_list(self):
         """每小时更新USDT交易对列表"""
@@ -100,32 +103,51 @@ class BinanceMonitor:
 
     def process_trade(self, trade):
         symbol = trade["s"]
-        price = float(trade["p"])
+        current_price = float(trade["p"])
         quantity = float(trade["q"])
-        volume = price * quantity
+        volume = current_price * quantity
         trade_time = datetime.utcfromtimestamp(trade["T"] / 1000)  # 使用 trade_time 变量
 
         # 检查是否进入新的一分钟
         trade_minute = trade_time.minute
         if trade_minute != self.current_minute:
             # 进入新的一分钟，仅重置每个代币的买卖成交量，而不重新初始化整个volume_data
-            for symbol in self.volume_data:
-                self.volume_data[symbol]["buy"] = 0
-                self.volume_data[symbol]["sell"] = 0
+            for symbol in self.volume_data_1m:
+                self.volume_data_1m[symbol]["buy"] = 0
+                self.volume_data_1m[symbol]["sell"] = 0
+                self.basic_prices_1m.clear()
             self.current_minute = trade_minute  # 更新当前分钟
+
+        trade_hour = trade_time.hour
+        if trade_hour != self.current_hour:
+            # 进入新的一小时，仅重置每个代币的买卖成交量，而不重新初始化整个volume_data
+            for symbol in self.volume_data_1h:
+                self.volume_data_1h[symbol]["buy"] = 0
+                self.volume_data_1h[symbol]["sell"] = 0
+            for symbol, current_price in self.last_prices.items():
+                self.basic_prices_1h.clear()
+                self.alert_triggered_1h.clear()
+                self.alert_count_1h.clear()
+            self.current_hour = trade_hour  # 更新当前分钟
 
         # 根据交易方向更新买卖成交量
         if trade["m"]:
             # Maker 订单 - 卖出
-            self.volume_data[symbol]["sell"] += volume
+            self.volume_data_1m[symbol]["sell"] += volume
+            self.volume_data_1h[symbol]["sell"] += volume
         else:
             # Taker 订单 - 买入
-            self.volume_data[symbol]["buy"] += volume
+            self.volume_data_1m[symbol]["buy"] += volume
+            self.volume_data_1h[symbol]["buy"] += volume
+
+        volume_1m = self.volume_data_1m[symbol]["buy"] + self.volume_data_1m[symbol]["sell"]
+        volume_1h = self.volume_data_1h[symbol]["buy"] + self.volume_data_1h[symbol]["sell"]
 
         # 调用价格波动检查
-        self.check_1m_fluctuation(symbol, price, self.volume_data[symbol], trade_time)
-        self.last_prices[symbol] = price
-        print(f"[DEBUG] {symbol} - Latest Price: {price}, Quantity: {quantity}, Volume: {volume}, Time: {trade_time}")
+        self.check_1m_fluctuation(symbol, current_price, trade_time, volume_1m)
+        self.check_1h_fluctuation(symbol, current_price, volume_1h)
+        self.last_prices[symbol] = current_price
+        print(f"[DEBUG] {symbol} - Latest Price: {current_price}, Quantity: {quantity}, Volume: {volume}, Time: {trade_time}")
 
     def reconnect_ws(self, batch_id, stream_names, delay=RECONNECT_DELAY):
         """指数退避重连机制"""
@@ -161,14 +183,14 @@ class BinanceMonitor:
             print(f"[ERROR] Failed to fetch 24hr data for {symbol}: {e}")
             return None
 
-    def check_1m_fluctuation(self, symbol, current_price, volume, trade_time):
+    def check_1m_fluctuation(self, symbol, current_price, volume_1m, trade_time):
         if symbol in self.last_prices:
             base_price = self.triggered_price_1m.get(symbol, self.last_prices[symbol])
             price_change = (current_price - base_price) / base_price
 
             # 获取买入和卖出累计成交量，取较大的一方
-            buy_volume = self.volume_data[symbol]["buy"]
-            sell_volume = self.volume_data[symbol]["sell"]
+            buy_volume = self.volume_data_1m[symbol]["buy"]
+            sell_volume = self.volume_data_1m[symbol]["sell"]
             dominant_volume = max(buy_volume, sell_volume)
             dominant_flow = "流入" if buy_volume > sell_volume else "流出"
             flow_dir = "🟢" if buy_volume > sell_volume else "🔴"    
@@ -177,65 +199,78 @@ class BinanceMonitor:
             print(f"[DEBUG] Checking 1-Minute Fluctuation for {symbol}")
             print(f"  Base Price: {base_price}, Current Price: {current_price}")
             print(f"  Price Change: {price_change * 100:.2f}%, Dominant Volume: {dominant_volume} USDT")
-            print(f"  Buyer (raw): {self.volume_data[symbol]['buy']} USDT, Seller (raw): {self.volume_data[symbol]['sell']} USDT")
             print(f"  Buyer: {buy_volume} USDT, Seller: {sell_volume} USDT, Dominant Volume: {dominant_volume} USDT")
 
             if abs(price_change) >= FLUCTUATION_THRESHOLD_1M and dominant_volume > VOLUME_THRESHOLD:
                 print(f"[DEBUG] 1-Minute Trigger Conditions Met for {symbol}")
-                time_since_last_trigger = (
-                    trade_time - self.triggered_time_1m.get(symbol, trade_time)
-                ).total_seconds()
+                last_trigger_time = self.triggered_time_1m.get(symbol)
+                if last_trigger_time is None:
+                    # 如果没有记录，则默认时间间隔为 60 秒，并记录当前时间
+                    time_since_last_trigger = 60
+                    self.triggered_time_1m[symbol] = trade_time
+                else:
+                    time_since_last_trigger = (trade_time - last_trigger_time).total_seconds()
 
                 time = (
-                      f"{int(time_since_last_trigger)} seconds" if time_since_last_trigger < 60 else "1 min"
+                      f"{int(time_since_last_trigger)} seconds" if time_since_last_trigger <= 60 else "1 min"
                 )
 
-                data_24hr = self.fetch_24hr_price_change(symbol)
-                if data_24hr is not None:
-                    self.vol_24h[symbol] = data_24hr["volume"]
+                volume = volume_1m
+                flow_percentage = (dominant_volume / volume) * 100
+                
+                self.alert_count_1h[symbol] += 1  # 增加小时内预警数
 
                 self.send_telegram_alert(
-                    symbol, current_price, price_change, dominant_volume, time, "1m",
-                    dominant_flow, flow_dir, buy_volume, sell_volume
+                    symbol, current_price, price_change, volume, dominant_volume, time,
+                    dominant_flow, flow_dir, flow_percentage, price_24hr
                 )
                 self.triggered_time_1m[symbol] = trade_time
                 self.triggered_price_1m[symbol] = current_price
             else:
                 print(f"[DEBUG] 1-Minute Trigger Conditions NOT Met for {symbol}")
-                if (trade_time - self.triggered_time_1m.get(symbol, trade_time)).total_seconds() >= 60:
-                    self.triggered_price_1m[symbol] = current_price
 
-    def check_1h_fluctuation(self, symbol, current_price):
+    def check_1h_fluctuation(self, symbol, current_price, volume_1h):
         # Check 1-hour fluctuation against baseline price
-        
-        if symbol in self.hourly_baseline and self.hourly_baseline[symbol] is not None:
-            baseline_price = self.hourly_baseline[symbol]
-            price_change = (current_price - baseline_price) / baseline_price
+            buy_volume = self.volume_data_1h[symbol]["buy"]
+            sell_volume = self.volume_data_1h[symbol]["sell"]
+            dominant_volume = max(buy_volume, sell_volume)
+            dominant_flow = "流入" if buy_volume > sell_volume else "流出"
+            volume = volume_1h
+            flow_percentage = (dominant_volume / volume) * 100
 
-            # Only trigger alert once per hour for a symbol
-        if abs(price_change) >= FLUCTUATION_THRESHOLD_1H and symbol not in self.alert_triggered_1h:
-            # 计算当前时间与整点基准时间的分钟差
-            minutes_since_baseline = int((datetime.utcnow() - datetime.combine(
-                datetime.utcnow().date(), datetime.utcnow().time().replace(minute=0, second=0, microsecond=0)
-            )).total_seconds() / 60)
+            flow_dir = "🟢" if buy_volume > sell_volume else "🔴"    
+            if symbol in self.hourly_baseline and self.hourly_baseline[symbol] is not None:
+                baseline_price = self.hourly_baseline[symbol]
+                price_change = (current_price - baseline_price) / baseline_price
 
-            time = f"{minutes_since_baseline} min"
+                # Only trigger alert once per hour for a symbol
+                if abs(price_change) >= FLUCTUATION_THRESHOLD_1H and symbol not in self.alert_triggered_1h:
+                    # 计算当前时间与整点基准时间的分钟差
+                    now = datetime.utcnow()  # 获取当前时间
+                    baseline = datetime.combine(now.date(), now.time().replace(minute=0, second=0, microsecond=0))  # 获取今天的零点
+                    minutes_since_baseline = (now - baseline).total_seconds() / 60
+                    
+                    time = f"{int(minutes_since_baseline)} min"
 
-            # 设置已触发标志并发送提醒
-            self.alert_triggered_1h.add(symbol)
-            self.alert_count_1h[symbol] += 1  # 增加小时内预警数
+                    # 设置已触发标志并发送提醒
+                    self.alert_triggered_1h.add(symbol)
+                    self.alert_count_1h[symbol] += 1  # 增加小时内预警数
 
-            # 调用提醒函数
-            self.send_telegram_alert(
-                symbol,
-                current_price,
-                price_change,
-                self.vol_24h.get(symbol, 0.0),
-                f"{minutes_since_baseline} min",
-                "1h"
-            )
+                    # 调用提醒函数
+                    self.send_telegram_alert(
+                        symbol,
+                        current_price,
+                        price_change,
+                        dominant_volume,
+                        dominant_flow,
+                        flow_percentage,
+                        flow_dir,
+                        volume,
+                        time
+                    )
+            else: self.hourly_baseline[symbol] = current_price
+
     def format_volume(self, volume):
-        """格式化成交量为带单位的字符串（K, M, B等）"""
         if volume >= 1_000_000_000:
             return f"{volume / 1_000_000_000:.2f}B"
         elif volume >= 1_000_000:
@@ -245,7 +280,7 @@ class BinanceMonitor:
         else:
             return f"{volume:.2f}"
 
-    def send_telegram_alert(self, symbol, price, price_change, volume, time, interval_type, dominant_flow, flow_dir, buy_volume, sell_volume):
+    def send_telegram_alert(self, symbol, current_price, price_change, time, dominant_flow, flow_dir, volume):
         # 判断涨跌方向
         change_dir = "📈" if price_change > 0 else "📉"
     
@@ -256,14 +291,12 @@ class BinanceMonitor:
             return
         percent_change_24h = data_24hr["priceChangePercent"]
         change_text_24h = f"{percent_change_24h:+.2f}%"
-
-        # 计算占比
-        flow_percentage = (dominant_volume / volume) * 100
+        vol_24h_raw = data_24hr["quoteVolume"]
 
         # 格式化成交量
         total_volume = self.format_volume(volume)
         dominant_volume_formatted = self.format_volume(dominant_volume)
-        vol_24h = self.format_volume(self.vol_24h.get(symbol, 0.0))
+        vol_24h = self.format_volume(vol_24h_raw)
 
         # 1小时预警星星数
         alert_count = self.alert_count_1h[symbol]
@@ -274,8 +307,8 @@ class BinanceMonitor:
 
         # 消息格式化
         message = (
-            f"${symbol} | #{symbol}_USDT\n"
-            f"Price: {price:.4f} ({change_text_24h} in 24h)\n"
+            f"${symbol} | #{symbol}\n"
+            f"Price: {current_price:.4f} ({change_text_24h} in 24h)\n"
             f"└ {interval_display}\n"
             f"{total_volume} USDT traded in {time}\n"
             f"└ {dominant_flow}: {dominant_volume_formatted} USDT [{flow_percentage:.1f}%] {flow_dir}\n"
